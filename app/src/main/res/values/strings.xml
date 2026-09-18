@@ -1,1 +1,4 @@
-<resources><string name="app_name">Just Assistant</string></resources>
+<resources>
+    <string name="app_name">Just Assistant</string>
+    <string name="accessibility_description">Global voice shortcut for Just Assistant. Double-press Volume Up to start or stop the assistant.</string>
+</resources>

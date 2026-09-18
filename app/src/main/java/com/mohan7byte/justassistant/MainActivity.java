@@ -34,6 +34,10 @@ public class MainActivity extends AppCompatActivity {
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
+        Thread.setDefaultUncaughtExceptionHandler((thread, error) -> {
+            getSharedPreferences("just_assistant_crash", MODE_PRIVATE)
+                    .edit().putString("last_error", android.util.Log.getStackTraceString(error)).commit();
+        });
 
         ScrollView scroll = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
@@ -114,19 +118,19 @@ public class MainActivity extends AppCompatActivity {
         if (SecurePrefs.isRunning(this)) {
             stopService(new Intent(this, LiveAssistantService.class));
         } else {
-            if (!hasMicPermission() || needsNotificationPermission()) {
-                if (android.os.Build.VERSION.SDK_INT >= 33) {
-                    ActivityCompat.requestPermissions(this,
-                            new String[]{Manifest.permission.RECORD_AUDIO,
-                                    Manifest.permission.POST_NOTIFICATIONS}, REQUEST_PERMISSIONS);
-                } else {
-                    ActivityCompat.requestPermissions(this,
-                            new String[]{Manifest.permission.RECORD_AUDIO}, REQUEST_PERMISSIONS);
-                }
+            if (!hasMicPermission()) {
+                ActivityCompat.requestPermissions(this,
+                        new String[]{Manifest.permission.RECORD_AUDIO}, REQUEST_PERMISSIONS);
                 return;
             }
-            ContextCompat.startForegroundService(this,
-                    new Intent(this, LiveAssistantService.class));
+            try {
+                ContextCompat.startForegroundService(this,
+                        new Intent(this, LiveAssistantService.class));
+            } catch (RuntimeException e) {
+                Toast.makeText(this, "Could not start Live: " +
+                        (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()),
+                        Toast.LENGTH_LONG).show();
+            }
         }
         updateStatus();
     }
@@ -215,6 +219,8 @@ public class MainActivity extends AppCompatActivity {
         super.onRequestPermissionsResult(requestCode, permissions, results);
         if (requestCode == REQUEST_PERMISSIONS && hasMicPermission()) {
             toggleLive();
+        } else if (requestCode == REQUEST_PERMISSIONS && !hasMicPermission()) {
+            Toast.makeText(this, "Microphone permission is required for Gemini Live.", Toast.LENGTH_LONG).show();
         }
     }
 }

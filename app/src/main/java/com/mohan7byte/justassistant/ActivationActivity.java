@@ -45,8 +45,15 @@ public class ActivationActivity extends Activity {
         }
 
         Intent live = new Intent(this, LiveAssistantService.class);
-        ContextCompat.startForegroundService(this, live);
-        finishDelayed(450);
+        try {
+            ContextCompat.startForegroundService(this, live);
+            finishDelayed(450);
+        } catch (RuntimeException e) {
+            android.widget.Toast.makeText(this,
+                    "Could not start Live. Open the app once and start Live from there.",
+                    android.widget.Toast.LENGTH_LONG).show();
+            finishDelayed(900);
+        }
     }
 
     private void finishDelayed(long ms) {

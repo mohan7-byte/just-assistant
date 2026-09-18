@@ -116,9 +116,11 @@ public class LiveAssistantService extends Service {
                 .build();
 
         Request request = new Request.Builder().url(url).build();
-        client = new OkHttpClient.Builder()
-                .retryOnConnectionFailure(true)
-                .build();
+        if (client == null) {
+            client = new OkHttpClient.Builder()
+                    .retryOnConnectionFailure(true)
+                    .build();
+        }
 
         socket = client.newWebSocket(request, new WebSocketListener() {
             @Override public void onOpen(WebSocket ws, Response response) {
@@ -210,6 +212,10 @@ public class LiveAssistantService extends Service {
             if (content.optBoolean("interrupted", false)) {
                 flushPlayback();
                 return;
+            }
+
+            if (content.optBoolean("turnComplete", false)) {
+                setOrbSpeaking(false);
             }
 
             JSONObject modelTurn = content.optJSONObject("modelTurn");

@@ -118,19 +118,19 @@ public class MainActivity extends AppCompatActivity {
         if (SecurePrefs.isRunning(this)) {
             stopService(new Intent(this, LiveAssistantService.class));
         } else {
-            if (!hasMicPermission() || needsNotificationPermission()) {
-                if (android.os.Build.VERSION.SDK_INT >= 33) {
-                    ActivityCompat.requestPermissions(this,
-                            new String[]{Manifest.permission.RECORD_AUDIO,
-                                    Manifest.permission.POST_NOTIFICATIONS}, REQUEST_PERMISSIONS);
-                } else {
-                    ActivityCompat.requestPermissions(this,
-                            new String[]{Manifest.permission.RECORD_AUDIO}, REQUEST_PERMISSIONS);
-                }
+            if (!hasMicPermission()) {
+                ActivityCompat.requestPermissions(this,
+                        new String[]{Manifest.permission.RECORD_AUDIO}, REQUEST_PERMISSIONS);
                 return;
             }
-            ContextCompat.startForegroundService(this,
-                    new Intent(this, LiveAssistantService.class));
+            try {
+                ContextCompat.startForegroundService(this,
+                        new Intent(this, LiveAssistantService.class));
+            } catch (RuntimeException e) {
+                Toast.makeText(this, "Could not start Live: " +
+                        (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()),
+                        Toast.LENGTH_LONG).show();
+            }
         }
         updateStatus();
     }
@@ -217,8 +217,7 @@ public class MainActivity extends AppCompatActivity {
 
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(requestCode, permissions, results);
-        if (requestCode == REQUEST_PERMISSIONS && hasMicPermission()
-                && !needsNotificationPermission()) {
+        if (requestCode == REQUEST_PERMISSIONS && hasMicPermission()) {
             toggleLive();
         } else if (requestCode == REQUEST_PERMISSIONS && !hasMicPermission()) {
             Toast.makeText(this, "Microphone permission is required for Gemini Live.", Toast.LENGTH_LONG).show();

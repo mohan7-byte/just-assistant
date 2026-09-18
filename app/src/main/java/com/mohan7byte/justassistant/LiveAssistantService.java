@@ -53,6 +53,7 @@ public class LiveAssistantService extends Service {
 
     private volatile boolean userStopped = true;
     private volatile boolean reconnectPending;
+    private volatile int consecutiveFailures;
     private volatile String apiKey;
     private volatile String model;
     private volatile String persona;
@@ -128,6 +129,11 @@ public class LiveAssistantService extends Service {
         if (!running.get()) return;
         sessionReady.set(false);
 
+        if (apiKey == null || apiKey.trim().isEmpty()) {
+            failSession("Gemini API key is missing.");
+            return;
+        }
+
         if (socket != null) {
             try { socket.close(1000, "reconnect"); } catch (Exception ignored) {}
             socket = null;
@@ -146,6 +152,7 @@ public class LiveAssistantService extends Service {
 
         socket = client.newWebSocket(request, new WebSocketListener() {
             @Override public void onOpen(WebSocket ws, Response response) {
+                consecutiveFailures = 0;
                 sendSetup(ws);
             }
 
@@ -156,13 +163,29 @@ public class LiveAssistantService extends Service {
             @Override public void onFailure(WebSocket ws, Throwable t, Response response) {
                 sessionReady.set(false);
                 stopCapture();
-                if (!userStopped) scheduleReconnect(700);
+                if (userStopped) return;
+
+                int http = response == null ? -1 : response.code();
+                if (http == 400 || http == 401 || http == 403 || http == 404
+                        || ++consecutiveFailures >= 5) {
+                    failSession("Gemini connection failed" +
+                            (http > 0 ? " (" + http + ")" : "") +
+                            ". Check the API key and model name.");
+                } else {
+                    scheduleReconnect(Math.min(5000L, 500L * consecutiveFailures));
+                }
             }
 
             @Override public void onClosed(WebSocket ws, int code, String reason) {
                 sessionReady.set(false);
                 stopCapture();
-                if (!userStopped) scheduleReconnect(500);
+                if (!userStopped) {
+                    if (++consecutiveFailures >= 5) {
+                        failSession("Gemini Live connection closed repeatedly.");
+                    } else {
+                        scheduleReconnect(Math.min(5000L, 500L * consecutiveFailures));
+                    }
+                }
             }
         });
     }
@@ -193,7 +216,7 @@ public class LiveAssistantService extends Service {
 
             ws.send(new JSONObject().put("setup", setup).toString());
         } catch (Exception e) {
-            stopSession();
+            failSession("Could not configure Gemini Live: " + safeError(e));
         }
     }
 
@@ -534,6 +557,30 @@ public class LiveAssistantService extends Service {
     private void notifyState(String text) {
         createChannel();
         updateNotification(text);
+    }
+
+    private void failSession(String message) {
+        userStopped = true;
+        running.set(false);
+        sessionReady.set(false);
+        reconnectPending = false;
+        SecurePrefs.saveRunning(this, false);
+        stopCapture();
+        flushPlayback();
+
+        if (socket != null) {
+            try { socket.cancel(); } catch (Exception ignored) {}
+            socket = null;
+        }
+        if (client != null) {
+            try { client.dispatcher().cancelAll(); } catch (Exception ignored) {}
+            client = null;
+        }
+
+        removeOverlay();
+        notifyState(message);
+        try { stopForeground(STOP_FOREGROUND_REMOVE); } catch (Exception ignored) {}
+        stopSelf();
     }
 
     private boolean hasMicPermission() {

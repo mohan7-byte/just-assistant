@@ -30,6 +30,20 @@ jobs:
           echo "$RUNNER_TEMP/gradle/gradle-8.13/bin" >> "$GITHUB_PATH"
           gradle --version
 
+      - name: Restore stable debug signing key
+        id: debug-signing-cache
+        uses: actions/cache@v4
+        with:
+          path: signing/stable-debug.keystore
+          key: just-assistant-debug-keystore-v1
+
+      - name: Create stable debug signing key
+        if: steps.debug-signing-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p signing
+          keytool -genkeypair -v             -keystore signing/stable-debug.keystore             -storepass justassistant             -keypass justassistant             -alias justassistant             -keyalg RSA             -keysize 2048             -validity 10000             -dname "CN=Just Assistant Debug,O=Just Assistant,C=IN"
+
       - name: Compile Android debug APK
         run: gradle --no-daemon :app:assembleDebug
 

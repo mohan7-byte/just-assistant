@@ -1,0 +1,21 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'com.mohan7byte.justassistant'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'com.mohan7byte.justassistant'
+        minSdk 26
+        targetSdk 36
+        versionCode 1
+        versionName '0.1.0'
+    }
+    buildTypes { release { minifyEnabled false } }
+}
+dependencies {
+    implementation 'androidx.core:core:1.17.0'
+    implementation 'androidx.appcompat:appcompat:1.7.1'
+    implementation 'com.google.code.gson:gson:2.13.2'
+    implementation 'com.squareup.okhttp3:okhttp:5.1.0'
+}

@@ -80,7 +80,13 @@ public class LiveAssistantService extends Service {
         persona = SecurePrefs.getPersona(this);
 
         if (apiKey.isEmpty()) {
-            notifyState("Add a Gemini API key in Settings");
+            notifyState("Open Just Assistant and save your Gemini API key first.");
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+
+        if (!hasMicPermission()) {
+            notifyState("Microphone permission is required.");
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -88,15 +94,31 @@ public class LiveAssistantService extends Service {
         if (running.compareAndSet(false, true)) {
             userStopped = false;
             SecurePrefs.saveRunning(this, true);
-            if (Build.VERSION.SDK_INT >= 29) {
-                startForeground(NOTIF_ID, buildNotification(),
-                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
-            } else {
-                startForeground(NOTIF_ID, buildNotification());
+            try {
+                if (Build.VERSION.SDK_INT >= 29) {
+                    startForeground(NOTIF_ID, buildNotification(),
+                            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
+                } else {
+                    startForeground(NOTIF_ID, buildNotification());
+                }
+                showOverlay();
+                initPlayback();
+                connect(false);
+            } catch (SecurityException e) {
+                running.set(false);
+                SecurePrefs.saveRunning(this, false);
+                removeOverlay();
+                notifyState("Android blocked the microphone background service. Start Live once from the app, then retry.");
+                stopForeground(STOP_FOREGROUND_REMOVE);
+                stopSelf();
+            } catch (Exception e) {
+                running.set(false);
+                SecurePrefs.saveRunning(this, false);
+                removeOverlay();
+                notifyState("Could not start Live: " + safeError(e));
+                stopForeground(STOP_FOREGROUND_REMOVE);
+                stopSelf();
             }
-            showOverlay();
-            initPlayback();
-            connect(false);
         }
 
         return START_NOT_STICKY;
@@ -270,12 +292,17 @@ public class LiveAssistantService extends Service {
             int bufferSize = Math.max(min * 2, 4096);
 
             try {
-                recorder = new AudioRecord(
+                AudioRecord input = new AudioRecord(
                         MediaRecorder.AudioSource.VOICE_COMMUNICATION,
                         sampleRate,
                         AudioFormat.CHANNEL_IN_MONO,
                         AudioFormat.ENCODING_PCM_16BIT,
                         bufferSize);
+                if (input.getState() != AudioRecord.STATE_INITIALIZED) {
+                    input.release();
+                    throw new IllegalStateException("Microphone initialization failed");
+                }
+                recorder = input;
 
                 if (android.media.audiofx.AcousticEchoCanceler.isAvailable()) {
                     echoCanceler = android.media.audiofx.AcousticEchoCanceler.create(recorder.getAudioSessionId());
@@ -335,10 +362,12 @@ public class LiveAssistantService extends Service {
         int min = AudioTrack.getMinBufferSize(
                 24000, AudioFormat.CHANNEL_OUT_MONO,
                 AudioFormat.ENCODING_PCM_16BIT);
+        if (min <= 0) throw new IllegalStateException("Audio output is unavailable");
+
         int buffer = Math.max(min * 2, 8192);
 
         AudioAttributes attrs = new AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                 .build();
         AudioFormat format = new AudioFormat.Builder()
@@ -347,15 +376,22 @@ public class LiveAssistantService extends Service {
                 .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                 .build();
 
-        player = new AudioTrack(attrs, format, buffer,
+        AudioTrack track = new AudioTrack(attrs, format, buffer,
                 AudioTrack.MODE_STREAM, AudioManager.AUDIO_SESSION_ID_GENERATE);
+        if (track.getState() != AudioTrack.STATE_INITIALIZED) {
+            track.release();
+            throw new IllegalStateException("Audio output initialization failed");
+        }
+
+        player = track;
         player.play();
 
         playbackExecutor.execute(() -> {
             while (running.get()) {
                 try {
                     byte[] chunk = audioQueue.take();
-                    if (player != null) player.write(chunk, 0, chunk.length);
+                    AudioTrack current = player;
+                    if (current != null) current.write(chunk, 0, chunk.length);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     break;
@@ -498,6 +534,16 @@ public class LiveAssistantService extends Service {
     private void notifyState(String text) {
         createChannel();
         updateNotification(text);
+    }
+
+    private boolean hasMicPermission() {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private String safeError(Exception e) {
+        String message = e.getMessage();
+        return message == null || message.isEmpty() ? e.getClass().getSimpleName() : message;
     }
 
     @Override public void onDestroy() {

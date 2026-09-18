@@ -113,6 +113,11 @@ public class MainActivity extends AppCompatActivity {
         updateStatus();
     }
 
+    @Override protected void onPause() {
+        saveSettings();
+        super.onPause();
+    }
+
     private void toggleLive() {
         saveSettings();
         if (SecurePrefs.isRunning(this)) {

@@ -34,6 +34,10 @@ public class MainActivity extends AppCompatActivity {
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
+        Thread.setDefaultUncaughtExceptionHandler((thread, error) -> {
+            getSharedPreferences("just_assistant_crash", MODE_PRIVATE)
+                    .edit().putString("last_error", android.util.Log.getStackTraceString(error)).commit();
+        });
 
         ScrollView scroll = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
@@ -213,8 +217,11 @@ public class MainActivity extends AppCompatActivity {
 
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(requestCode, permissions, results);
-        if (requestCode == REQUEST_PERMISSIONS && hasMicPermission()) {
+        if (requestCode == REQUEST_PERMISSIONS && hasMicPermission()
+                && !needsNotificationPermission()) {
             toggleLive();
+        } else if (requestCode == REQUEST_PERMISSIONS && !hasMicPermission()) {
+            Toast.makeText(this, "Microphone permission is required for Gemini Live.", Toast.LENGTH_LONG).show();
         }
     }
 }

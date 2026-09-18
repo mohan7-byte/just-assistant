@@ -114,9 +114,15 @@ public class MainActivity extends AppCompatActivity {
         if (SecurePrefs.isRunning(this)) {
             stopService(new Intent(this, LiveAssistantService.class));
         } else {
-            if (!hasMicPermission()) {
-                ActivityCompat.requestPermissions(this,
-                        new String[]{Manifest.permission.RECORD_AUDIO}, REQUEST_PERMISSIONS);
+            if (!hasMicPermission() || needsNotificationPermission()) {
+                if (android.os.Build.VERSION.SDK_INT >= 33) {
+                    ActivityCompat.requestPermissions(this,
+                            new String[]{Manifest.permission.RECORD_AUDIO,
+                                    Manifest.permission.POST_NOTIFICATIONS}, REQUEST_PERMISSIONS);
+                } else {
+                    ActivityCompat.requestPermissions(this,
+                            new String[]{Manifest.permission.RECORD_AUDIO}, REQUEST_PERMISSIONS);
+                }
                 return;
             }
             ContextCompat.startForegroundService(this,
@@ -157,6 +163,12 @@ public class MainActivity extends AppCompatActivity {
     private boolean hasMicPermission() {
         return ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
                 == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private boolean needsNotificationPermission() {
+        return android.os.Build.VERSION.SDK_INT >= 33
+                && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED;
     }
 
     private void updateStatus() {

@@ -34,10 +34,6 @@ public class MainActivity extends AppCompatActivity {
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
-        Thread.setDefaultUncaughtExceptionHandler((thread, error) -> {
-            getSharedPreferences("just_assistant_crash", MODE_PRIVATE)
-                    .edit().putString("last_error", android.util.Log.getStackTraceString(error)).commit();
-        });
 
         ScrollView scroll = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
@@ -111,6 +107,11 @@ public class MainActivity extends AppCompatActivity {
     @Override protected void onResume() {
         super.onResume();
         updateStatus();
+    }
+
+    @Override protected void onPause() {
+        saveSettings();
+        super.onPause();
     }
 
     private void toggleLive() {

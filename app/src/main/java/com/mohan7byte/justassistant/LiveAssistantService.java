@@ -7,10 +7,7 @@ import android.content.pm.PackageManager;
 import android.media.*;
 import android.os.Build;
 import android.os.IBinder;
-import android.provider.Settings;
 import android.util.Base64;
-import android.view.Gravity;
-import android.view.WindowManager;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
@@ -19,7 +16,6 @@ import androidx.core.content.ContextCompat;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.nio.charset.StandardCharsets;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -38,14 +34,12 @@ public class LiveAssistantService extends Service {
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean sessionReady = new AtomicBoolean(false);
-    private final BlockingQueue<byte[]> audioQueue = new LinkedBlockingQueue<>(64);
+    private final BlockingQueue<byte[]> audioQueue = new LinkedBlockingQueue<>(96);
 
     private OkHttpClient client;
     private WebSocket socket;
     private AudioRecord recorder;
     private AudioTrack player;
-    private android.media.audiofx.AcousticEchoCanceler echoCanceler;
-    private android.media.audiofx.NoiseSuppressor noiseSuppressor;
 
     private ExecutorService captureExecutor;
     private ExecutorService playbackExecutor;
@@ -59,13 +53,14 @@ public class LiveAssistantService extends Service {
     private volatile String persona;
     private volatile String resumeHandle;
 
-    private WindowManager windowManager;
-    private OrbView orbView;
-
     @Override public void onCreate() {
         super.onCreate();
         scheduler = Executors.newSingleThreadScheduledExecutor();
         playbackExecutor = Executors.newSingleThreadExecutor();
+
+        scheduler.scheduleAtFixedRate(() -> {
+            if (running.get()) SecurePrefs.touchRunning(this);
+        }, 0, 2, TimeUnit.SECONDS);
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
@@ -81,19 +76,19 @@ public class LiveAssistantService extends Service {
         persona = SecurePrefs.getPersona(this);
 
         if (apiKey.isEmpty()) {
-            notifyState("Open Just Assistant and save your Gemini API key first.");
-            stopSelf();
+            failSession("Open Just Assistant and save your Gemini API key first.");
             return START_NOT_STICKY;
         }
 
         if (!hasMicPermission()) {
-            notifyState("Microphone permission is required.");
-            stopSelf();
+            failSession("Microphone permission is required.");
             return START_NOT_STICKY;
         }
 
         if (running.compareAndSet(false, true)) {
             userStopped = false;
+            reconnectPending = false;
+            consecutiveFailures = 0;
             SecurePrefs.saveRunning(this, true);
             try {
                 if (Build.VERSION.SDK_INT >= 29) {
@@ -102,23 +97,14 @@ public class LiveAssistantService extends Service {
                 } else {
                     startForeground(NOTIF_ID, buildNotification());
                 }
-                showOverlay();
+
+                notifyState(LiveState.CONNECTING, "Connecting to Gemini Live…");
                 initPlayback();
                 connect(false);
             } catch (SecurityException e) {
-                running.set(false);
-                SecurePrefs.saveRunning(this, false);
-                removeOverlay();
-                notifyState("Android blocked the microphone background service. Start Live once from the app, then retry.");
-                stopForeground(STOP_FOREGROUND_REMOVE);
-                stopSelf();
+                failSession("Android blocked microphone access. Open the app and tap Start Live once.");
             } catch (Exception e) {
-                running.set(false);
-                SecurePrefs.saveRunning(this, false);
-                removeOverlay();
-                notifyState("Could not start Live: " + safeError(e));
-                stopForeground(STOP_FOREGROUND_REMOVE);
-                stopSelf();
+                failSession("Could not start Live: " + safeError(e));
             }
         }
 
@@ -135,7 +121,7 @@ public class LiveAssistantService extends Service {
         }
 
         if (socket != null) {
-            try { socket.close(1000, "reconnect"); } catch (Exception ignored) {}
+            try { socket.cancel(); } catch (Exception ignored) {}
             socket = null;
         }
 
@@ -143,10 +129,14 @@ public class LiveAssistantService extends Service {
                 .addQueryParameter("key", apiKey)
                 .build();
 
-        Request request = new Request.Builder().url(url).build();
+        Request request = new Request.Builder()
+                .url(url)
+                .build();
+
         if (client == null) {
             client = new OkHttpClient.Builder()
                     .retryOnConnectionFailure(true)
+                    .pingInterval(15, TimeUnit.SECONDS)
                     .build();
         }
 
@@ -163,27 +153,29 @@ public class LiveAssistantService extends Service {
             @Override public void onFailure(WebSocket ws, Throwable t, Response response) {
                 sessionReady.set(false);
                 stopCapture();
+
                 if (userStopped) return;
 
                 int http = response == null ? -1 : response.code();
                 if (http == 400 || http == 401 || http == 403 || http == 404
                         || ++consecutiveFailures >= 5) {
-                    failSession("Gemini connection failed" +
-                            (http > 0 ? " (" + http + ")" : "") +
-                            ". Check the API key and model name.");
+                    failSession("Gemini Live connection failed"
+                            + (http > 0 ? " (" + http + ")" : "")
+                            + ". Check your API key and model name.");
                 } else {
-                    scheduleReconnect(Math.min(5000L, 500L * consecutiveFailures));
+                    scheduleReconnect(Math.min(5000L, 750L * consecutiveFailures));
                 }
             }
 
             @Override public void onClosed(WebSocket ws, int code, String reason) {
                 sessionReady.set(false);
                 stopCapture();
+
                 if (!userStopped) {
                     if (++consecutiveFailures >= 5) {
                         failSession("Gemini Live connection closed repeatedly.");
                     } else {
-                        scheduleReconnect(Math.min(5000L, 500L * consecutiveFailures));
+                        scheduleReconnect(Math.min(5000L, 750L * consecutiveFailures));
                     }
                 }
             }
@@ -194,10 +186,7 @@ public class LiveAssistantService extends Service {
         try {
             JSONObject setup = new JSONObject();
             setup.put("model", model.startsWith("models/") ? model : "models/" + model);
-
-            JSONObject generation = new JSONObject();
-            generation.put("responseModalities", new JSONArray().put("AUDIO"));
-            setup.put("generationConfig", generation);
+            setup.put("responseModalities", new JSONArray().put("AUDIO"));
 
             JSONObject system = new JSONObject();
             system.put("parts", new JSONArray().put(new JSONObject().put("text", persona)));
@@ -205,8 +194,6 @@ public class LiveAssistantService extends Service {
 
             setup.put("contextWindowCompression",
                     new JSONObject().put("slidingWindow", new JSONObject()));
-            setup.put("inputAudioTranscription", new JSONObject());
-            setup.put("outputAudioTranscription", new JSONObject());
 
             JSONObject resume = new JSONObject();
             if (resumeHandle != null && !resumeHandle.isEmpty()) {
@@ -224,18 +211,31 @@ public class LiveAssistantService extends Service {
         try {
             JSONObject root = new JSONObject(text);
 
+            if (root.has("error")) {
+                JSONObject error = root.optJSONObject("error");
+                failSession(error == null
+                        ? "Gemini Live returned an error."
+                        : error.optString("message", "Gemini Live returned an error."));
+                return;
+            }
+
             if (root.has("sessionResumptionUpdate")) {
                 JSONObject sr = root.getJSONObject("sessionResumptionUpdate");
                 if (sr.optBoolean("resumable", false)) {
                     String handle = sr.optString("newHandle", "");
+                    if (handle.isEmpty()) {
+                        handle = sr.optString("handle", "");
+                    }
                     if (!handle.isEmpty()) resumeHandle = handle;
                 }
                 return;
             }
 
             if (root.has("goAway")) {
-                long delay = parseDurationMillis(root.getJSONObject("goAway").optJSONObject("timeLeft"));
+                long delay = parseDurationMillis(root.getJSONObject("goAway")
+                        .optJSONObject("timeLeft"));
                 delay = Math.max(250L, delay - 250L);
+
                 scheduler.schedule(() -> {
                     if (running.get() && socket != null) {
                         try { socket.close(1000, "server reconnect"); } catch (Exception ignored) {}
@@ -246,21 +246,25 @@ public class LiveAssistantService extends Service {
 
             if (root.has("setupComplete")) {
                 sessionReady.set(true);
+                consecutiveFailures = 0;
                 startCapture();
+                notifyState(LiveState.READY, "Gemini Live ready");
                 updateNotification("Gemini Live active");
                 return;
             }
 
-            if (!root.has("serverContent")) return;
-            JSONObject content = root.getJSONObject("serverContent");
+            JSONObject content = root.optJSONObject("serverContent");
+            if (content == null) return;
 
             if (content.optBoolean("interrupted", false)) {
                 flushPlayback();
+                notifyState(LiveState.IDLE, "Listening…");
                 return;
             }
 
             if (content.optBoolean("turnComplete", false)) {
                 setOrbSpeaking(false);
+                notifyState(LiveState.IDLE, "Listening…");
             }
 
             JSONObject modelTurn = content.optJSONObject("modelTurn");
@@ -283,16 +287,28 @@ public class LiveAssistantService extends Service {
                 byte[] pcm = Base64.decode(data, Base64.DEFAULT);
                 offerPlayback(pcm);
                 setOrbSpeaking(true);
+                notifyState(LiveState.SPEAKING, "Speaking…");
             }
         } catch (Exception ignored) {
-            // Ignore malformed/unrecognized events without killing the live session.
+            // Ignore individual malformed messages; keep the realtime session alive.
         }
     }
 
     private long parseDurationMillis(JSONObject duration) {
         if (duration == null) return 1500L;
+
         long seconds = duration.optLong("seconds", 0L);
         long nanos = duration.optLong("nanos", 0L);
+        String text = duration.optString("timeLeft", "");
+
+        if (text.endsWith("s")) {
+            try {
+                double value = Double.parseDouble(text.substring(0, text.length() - 1));
+                return Math.max(0L, Math.round(value * 1000.0));
+            } catch (Exception ignored) {
+            }
+        }
+
         return seconds * 1000L + nanos / 1_000_000L;
     }
 
@@ -302,16 +318,22 @@ public class LiveAssistantService extends Service {
 
         captureExecutor = Executors.newSingleThreadExecutor();
         captureExecutor.execute(() -> {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-                    != PackageManager.PERMISSION_GRANTED) {
-                stopSession();
+            if (!hasMicPermission()) {
+                failSession("Microphone permission was lost.");
                 return;
             }
 
             final int sampleRate = 16000;
             int min = AudioRecord.getMinBufferSize(
-                    sampleRate, AudioFormat.CHANNEL_IN_MONO,
+                    sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO,
                     AudioFormat.ENCODING_PCM_16BIT);
+
+            if (min <= 0) {
+                failSession("This device does not expose a 16 kHz microphone input.");
+                return;
+            }
+
             int bufferSize = Math.max(min * 2, 4096);
 
             try {
@@ -321,41 +343,41 @@ public class LiveAssistantService extends Service {
                         AudioFormat.CHANNEL_IN_MONO,
                         AudioFormat.ENCODING_PCM_16BIT,
                         bufferSize);
+
                 if (input.getState() != AudioRecord.STATE_INITIALIZED) {
                     input.release();
                     throw new IllegalStateException("Microphone initialization failed");
                 }
+
                 recorder = input;
-
-                if (android.media.audiofx.AcousticEchoCanceler.isAvailable()) {
-                    echoCanceler = android.media.audiofx.AcousticEchoCanceler.create(recorder.getAudioSessionId());
-                    if (echoCanceler != null) echoCanceler.setEnabled(true);
-                }
-                if (android.media.audiofx.NoiseSuppressor.isAvailable()) {
-                    noiseSuppressor = android.media.audiofx.NoiseSuppressor.create(recorder.getAudioSessionId());
-                    if (noiseSuppressor != null) noiseSuppressor.setEnabled(true);
-                }
-
                 recorder.startRecording();
-                byte[] pcm = new byte[2048]; // 64 ms at 16 kHz mono, 16-bit
+
+                // 1024 bytes = 32 ms of mono 16-bit PCM at 16 kHz.
+                byte[] pcm = new byte[1024];
 
                 while (running.get() && sessionReady.get()) {
                     int n = recorder.read(pcm, 0, pcm.length);
+
                     if (n <= 0 || socket == null) continue;
 
                     byte[] exact = new byte[n];
                     System.arraycopy(pcm, 0, exact, 0, n);
-                    String b64 = Base64.encodeToString(exact, Base64.NO_WRAP);
 
                     JSONObject audio = new JSONObject();
-                    audio.put("data", b64);
+                    audio.put("data", Base64.encodeToString(exact, Base64.NO_WRAP));
                     audio.put("mimeType", "audio/pcm;rate=16000");
 
                     JSONObject realtime = new JSONObject();
                     realtime.put("audio", audio);
-                    socket.send(new JSONObject().put("realtimeInput", realtime).toString());
+
+                    socket.send(new JSONObject()
+                            .put("realtimeInput", realtime)
+                            .toString());
                 }
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                if (!userStopped) {
+                    failSession("Microphone capture failed: " + safeError(e));
+                }
             } finally {
                 releaseRecorder();
             }
@@ -372,35 +394,42 @@ public class LiveAssistantService extends Service {
 
     private synchronized void releaseRecorder() {
         try { if (recorder != null) recorder.stop(); } catch (Exception ignored) {}
-        try { if (echoCanceler != null) echoCanceler.release(); } catch (Exception ignored) {}
-        try { if (noiseSuppressor != null) noiseSuppressor.release(); } catch (Exception ignored) {}
         try { if (recorder != null) recorder.release(); } catch (Exception ignored) {}
         recorder = null;
-        echoCanceler = null;
-        noiseSuppressor = null;
     }
 
     private void initPlayback() {
         if (player != null) return;
-        int min = AudioTrack.getMinBufferSize(
-                24000, AudioFormat.CHANNEL_OUT_MONO,
-                AudioFormat.ENCODING_PCM_16BIT);
-        if (min <= 0) throw new IllegalStateException("Audio output is unavailable");
 
-        int buffer = Math.max(min * 2, 8192);
+        int min = AudioTrack.getMinBufferSize(
+                24000,
+                AudioFormat.CHANNEL_OUT_MONO,
+                AudioFormat.ENCODING_PCM_16BIT);
+
+        if (min <= 0) {
+            throw new IllegalStateException("Audio output is unavailable");
+        }
 
         AudioAttributes attrs = new AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                .setUsage(AudioAttributes.USAGE_ASSISTANT)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                 .build();
+
         AudioFormat format = new AudioFormat.Builder()
                 .setSampleRate(24000)
                 .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                 .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                 .build();
 
-        AudioTrack track = new AudioTrack(attrs, format, buffer,
-                AudioTrack.MODE_STREAM, AudioManager.AUDIO_SESSION_ID_GENERATE);
+        int bufferSize = Math.max(min * 2, 8192);
+
+        AudioTrack track = new AudioTrack(
+                attrs,
+                format,
+                bufferSize,
+                AudioTrack.MODE_STREAM,
+                AudioManager.AUDIO_SESSION_ID_GENERATE);
+
         if (track.getState() != AudioTrack.STATE_INITIALIZED) {
             track.release();
             throw new IllegalStateException("Audio output initialization failed");
@@ -414,11 +443,14 @@ public class LiveAssistantService extends Service {
                 try {
                     byte[] chunk = audioQueue.take();
                     AudioTrack current = player;
-                    if (current != null) current.write(chunk, 0, chunk.length);
+                    if (current != null) {
+                        current.write(chunk, 0, chunk.length);
+                    }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     break;
-                } catch (Exception ignored) {}
+                } catch (Exception ignored) {
+                }
             }
         });
     }
@@ -438,12 +470,19 @@ public class LiveAssistantService extends Service {
                 player.flush();
                 player.play();
             }
-        } catch (Exception ignored) {}
+        } catch (Exception ignored) {
+        }
         setOrbSpeaking(false);
+    }
+
+    private void setOrbSpeaking(boolean speaking) {
+        notifyState(speaking ? LiveState.SPEAKING : LiveState.IDLE,
+                speaking ? "Speaking…" : "Listening…");
     }
 
     private void scheduleReconnect(long delayMs) {
         if (!running.get() || userStopped || reconnectPending) return;
+
         reconnectPending = true;
         scheduler.schedule(() -> {
             reconnectPending = false;
@@ -465,68 +504,55 @@ public class LiveAssistantService extends Service {
             try { socket.cancel(); } catch (Exception ignored) {}
             socket = null;
         }
+
         if (client != null) {
             try { client.dispatcher().cancelAll(); } catch (Exception ignored) {}
             client = null;
         }
 
-        removeOverlay();
+        notifyState(LiveState.STOPPED, "Stopped");
         stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
     }
 
-    private void showOverlay() {
-        if (!Settings.canDrawOverlays(this) || orbView != null) return;
-        try {
-            windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
-            orbView = new OrbView(this);
-            orbView.setOnClickListener(v -> stopSession());
+    private void failSession(String message) {
+        userStopped = true;
+        reconnectPending = false;
+        running.set(false);
+        sessionReady.set(false);
+        SecurePrefs.saveRunning(this, false);
 
-            WindowManager.LayoutParams p = new WindowManager.LayoutParams(
-                    96, 96,
-                    Build.VERSION.SDK_INT >= 26
-                            ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                            : WindowManager.LayoutParams.TYPE_PHONE,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-                            | WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED,
-                    android.graphics.PixelFormat.TRANSLUCENT);
-            p.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
-            p.y = dp(110);
-            windowManager.addView(orbView, p);
-        } catch (Exception ignored) {
-            orbView = null;
+        stopCapture();
+        flushPlayback();
+
+        if (socket != null) {
+            try { socket.cancel(); } catch (Exception ignored) {}
+            socket = null;
         }
-    }
 
-    private void removeOverlay() {
-        if (windowManager != null && orbView != null) {
-            try { windowManager.removeViewImmediate(orbView); } catch (Exception ignored) {}
+        if (client != null) {
+            try { client.dispatcher().cancelAll(); } catch (Exception ignored) {}
+            client = null;
         }
-        orbView = null;
-        windowManager = null;
-    }
 
-    private void setOrbSpeaking(boolean speaking) {
-        if (orbView != null) {
-            orbView.post(() -> orbView.setSpeaking(speaking));
-        }
-    }
-
-    private int dp(int v) {
-        return (int) (v * getResources().getDisplayMetrics().density + .5f);
+        notifyState(LiveState.ERROR, message);
+        updateNotification(message);
+        try { stopForeground(STOP_FOREGROUND_REMOVE); } catch (Exception ignored) {}
+        stopSelf();
     }
 
     private Notification buildNotification() {
         Intent stop = new Intent(this, StopReceiver.class);
         PendingIntent pi = PendingIntent.getBroadcast(
-                this, 1, stop,
+                this,
+                1,
+                stop,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
         return new NotificationCompat.Builder(this, CHANNEL)
                 .setSmallIcon(android.R.drawable.ic_btn_speak_now)
                 .setContentTitle("Just Assistant")
-                .setContentText("Gemini Live active")
+                .setContentText("Starting Gemini Live…")
                 .setOngoing(true)
                 .setCategory(NotificationCompat.CATEGORY_CALL)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -537,68 +563,62 @@ public class LiveAssistantService extends Service {
     private void createChannel() {
         NotificationManager nm = getSystemService(NotificationManager.class);
         nm.createNotificationChannel(new NotificationChannel(
-                CHANNEL, "Gemini Live", NotificationManager.IMPORTANCE_LOW));
+                CHANNEL,
+                "Gemini Live",
+                NotificationManager.IMPORTANCE_LOW));
     }
 
     private void updateNotification(String text) {
         NotificationManager nm = getSystemService(NotificationManager.class);
-        nm.notify(NOTIF_ID, new NotificationCompat.Builder(this, CHANNEL)
-                .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-                .setContentTitle("Just Assistant")
-                .setContentText(text)
-                .setOngoing(true)
-                .addAction(android.R.drawable.ic_media_pause, "Stop",
-                        PendingIntent.getBroadcast(this, 1,
-                                new Intent(this, StopReceiver.class),
-                                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE))
-                .build());
+        nm.notify(
+                NOTIF_ID,
+                new NotificationCompat.Builder(this, CHANNEL)
+                        .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                        .setContentTitle("Just Assistant")
+                        .setContentText(text)
+                        .setOngoing(true)
+                        .setCategory(NotificationCompat.CATEGORY_CALL)
+                        .setPriority(NotificationCompat.PRIORITY_LOW)
+                        .addAction(
+                                android.R.drawable.ic_media_pause,
+                                "Stop",
+                                PendingIntent.getBroadcast(
+                                        this,
+                                        1,
+                                        new Intent(this, StopReceiver.class),
+                                        PendingIntent.FLAG_UPDATE_CURRENT
+                                                | PendingIntent.FLAG_IMMUTABLE))
+                        .build());
     }
 
-    private void notifyState(String text) {
-        createChannel();
-        updateNotification(text);
-    }
-
-    private void failSession(String message) {
-        userStopped = true;
-        running.set(false);
-        sessionReady.set(false);
-        reconnectPending = false;
-        SecurePrefs.saveRunning(this, false);
-        stopCapture();
-        flushPlayback();
-
-        if (socket != null) {
-            try { socket.cancel(); } catch (Exception ignored) {}
-            socket = null;
-        }
-        if (client != null) {
-            try { client.dispatcher().cancelAll(); } catch (Exception ignored) {}
-            client = null;
-        }
-
-        removeOverlay();
-        notifyState(message);
-        try { stopForeground(STOP_FOREGROUND_REMOVE); } catch (Exception ignored) {}
-        stopSelf();
+    private void notifyState(String state, String message) {
+        Intent intent = new Intent(LiveState.ACTION);
+        intent.setPackage(getPackageName());
+        intent.putExtra(LiveState.EXTRA_STATE, state);
+        intent.putExtra(LiveState.EXTRA_MESSAGE, message);
+        sendBroadcast(intent);
     }
 
     private boolean hasMicPermission() {
-        return ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-                == PackageManager.PERMISSION_GRANTED;
+        return ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
     }
 
     private String safeError(Exception e) {
         String message = e.getMessage();
-        return message == null || message.isEmpty() ? e.getClass().getSimpleName() : message;
+        return message == null || message.isEmpty()
+                ? e.getClass().getSimpleName()
+                : message;
     }
 
     @Override public void onDestroy() {
-        if (running.get()) stopSession();
-        else {
+        if (running.get()) {
+            stopSession();
+        } else {
             SecurePrefs.saveRunning(this, false);
-            removeOverlay();
             stopCapture();
+
             if (socket != null) {
                 try { socket.cancel(); } catch (Exception ignored) {}
                 socket = null;
@@ -610,12 +630,15 @@ public class LiveAssistantService extends Service {
             try { player.release(); } catch (Exception ignored) {}
             player = null;
         }
+
         if (playbackExecutor != null) playbackExecutor.shutdownNow();
         if (scheduler != null) scheduler.shutdownNow();
+
         if (client != null) {
             try { client.dispatcher().cancelAll(); } catch (Exception ignored) {}
             client = null;
         }
+
         super.onDestroy();
     }
 

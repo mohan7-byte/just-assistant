@@ -125,7 +125,10 @@ public class LiveAssistantService extends Service {
             socket = null;
         }
 
-        HttpUrl url = HttpUrl.get(WS_ENDPOINT).newBuilder()
+        // OkHttp's HttpUrl only accepts http/https. Build the handshake URL as
+        // HTTPS; OkHttp converts HTTPS to WSS internally for WebSocket connections.
+        HttpUrl url = HttpUrl.get(WS_ENDPOINT.replaceFirst("^wss://", "https://"))
+                .newBuilder()
                 .addQueryParameter("key", apiKey)
                 .build();
 

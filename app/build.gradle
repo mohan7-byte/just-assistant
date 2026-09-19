@@ -12,8 +12,20 @@ android {
         versionName '0.2.0'
     }
 
+    signingConfigs {
+        stableDebug {
+            storeFile file('../signing/stable-debug.keystore')
+            storePassword 'justassistant'
+            keyAlias 'justassistant'
+            keyPassword 'justassistant'
+        }
+    }
+
     buildTypes {
-        debug { minifyEnabled false }
+        debug {
+            minifyEnabled false
+            signingConfig signingConfigs.stableDebug
+        }
         release { minifyEnabled false }
     }
 }

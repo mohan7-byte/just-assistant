@@ -1,7 +1,6 @@
 package com.mohan7byte.justassistant;
 
 import android.Manifest;
-import android.app.NotificationManager;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
@@ -9,7 +8,6 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.view.Gravity;
-import android.view.View;
 import android.view.ViewGroup;
 import android.widget.*;
 
@@ -18,7 +16,7 @@ import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
 public class MainActivity extends AppCompatActivity {
-    private static final int REQUEST_PERMISSIONS = 10;
+    private static final int REQUEST_MIC = 10;
     private static final String[] LIVE_MODELS = {
             "gemini-3.8-live",
             "gemini-3.8-live-extended-thinking",
@@ -34,10 +32,6 @@ public class MainActivity extends AppCompatActivity {
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
-        Thread.setDefaultUncaughtExceptionHandler((thread, error) -> {
-            getSharedPreferences("just_assistant_crash", MODE_PRIVATE)
-                    .edit().putString("last_error", android.util.Log.getStackTraceString(error)).commit();
-        });
 
         ScrollView scroll = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
@@ -83,7 +77,7 @@ public class MainActivity extends AppCompatActivity {
         persona.setText(SecurePrefs.getPersona(this));
         root.addView(persona, lp());
 
-        Button prepare = button("Enable global Volume Up shortcut");
+        Button prepare = button("Enable Volume Up shortcut");
         prepare.setOnClickListener(v -> prepareShortcut());
         root.addView(prepare, lp());
 
@@ -98,7 +92,7 @@ public class MainActivity extends AppCompatActivity {
         root.addView(status, lp());
 
         TextView note = new TextView(this);
-        note.setText("The hardware shortcut uses Android Accessibility key-event filtering and an overlay permission so the assistant can be invoked from other screens. The microphone stays inside a foreground service.");
+        note.setText("Use Accessibility to intercept the double Volume Up shortcut. The assistant uses an Accessibility overlay so the animation can remain visible over other apps and on the lock screen.");
         note.setTextColor(0xFF737381);
         note.setTextSize(12);
         note.setPadding(0, dp(18), 0, 0);
@@ -120,23 +114,31 @@ public class MainActivity extends AppCompatActivity {
 
     private void toggleLive() {
         saveSettings();
+
         if (SecurePrefs.isRunning(this)) {
             stopService(new Intent(this, LiveAssistantService.class));
-        } else {
-            if (!hasMicPermission()) {
-                ActivityCompat.requestPermissions(this,
-                        new String[]{Manifest.permission.RECORD_AUDIO}, REQUEST_PERMISSIONS);
-                return;
-            }
-            try {
-                ContextCompat.startForegroundService(this,
-                        new Intent(this, LiveAssistantService.class));
-            } catch (RuntimeException e) {
-                Toast.makeText(this, "Could not start Live: " +
-                        (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()),
-                        Toast.LENGTH_LONG).show();
-            }
+            updateStatus();
+            return;
         }
+
+        if (!hasMicPermission()) {
+            ActivityCompat.requestPermissions(
+                    this,
+                    new String[]{Manifest.permission.RECORD_AUDIO},
+                    REQUEST_MIC);
+            return;
+        }
+
+        try {
+            ContextCompat.startForegroundService(
+                    this,
+                    new Intent(this, LiveAssistantService.class));
+        } catch (RuntimeException e) {
+            Toast.makeText(this,
+                    "Could not start Live. Try again from the visible app screen.",
+                    Toast.LENGTH_LONG).show();
+        }
+
         updateStatus();
     }
 
@@ -145,10 +147,14 @@ public class MainActivity extends AppCompatActivity {
         String modelName = model.getText().toString().trim();
         String personaText = persona.getText().toString().trim();
 
-        if (!key.isEmpty()) SecurePrefs.saveApiKey(this, key);
+        if (!key.isEmpty()) {
+            SecurePrefs.saveApiKey(this, key);
+        }
+
         if (modelName.isEmpty()) modelName = "gemini-3.8-live";
-        if (personaText.isEmpty()) personaText =
-                "You are a helpful voice assistant. Be concise, natural, and conversational.";
+        if (personaText.isEmpty()) {
+            personaText = "You are a helpful voice assistant. Be concise, natural, and conversational.";
+        }
 
         SecurePrefs.saveModel(this, modelName);
         SecurePrefs.savePersona(this, personaText);
@@ -156,40 +162,29 @@ public class MainActivity extends AppCompatActivity {
 
     private void prepareShortcut() {
         saveSettings();
-
-        if (!Settings.canDrawOverlays(this)) {
-            Intent i = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:" + getPackageName()));
-            startActivity(i);
-            Toast.makeText(this, "Allow 'Display over other apps', then return here.", Toast.LENGTH_LONG).show();
-            return;
-        }
-
         startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
-        Toast.makeText(this, "Enable Just Assistant under Accessibility, then return here.", Toast.LENGTH_LONG).show();
+        Toast.makeText(
+                this,
+                "Enable Just Assistant under Accessibility, then return here.",
+                Toast.LENGTH_LONG).show();
     }
 
     private boolean hasMicPermission() {
-        return ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-                == PackageManager.PERMISSION_GRANTED;
-    }
-
-    private boolean needsNotificationPermission() {
-        return android.os.Build.VERSION.SDK_INT >= 33
-                && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-                != PackageManager.PERMISSION_GRANTED;
+        return ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
     }
 
     private void updateStatus() {
         if (status == null) return;
-        boolean overlay = Settings.canDrawOverlays(this);
-        status.setText(SecurePrefs.isRunning(this)
-                ? "● Gemini Live is running"
-                : "Ready"
-                + (overlay ? "" : "  •  overlay permission not enabled"));
-        status.setTextColor(SecurePrefs.isRunning(this) ? 0xFF7CFFB2 : 0xFF9F9FAD);
-        if (startStop != null) startStop.setText(
-                SecurePrefs.isRunning(this) ? "Stop Live" : "Start Live");
+
+        boolean running = SecurePrefs.isRunning(this);
+        status.setText(running ? "● Gemini Live is running" : "Ready");
+        status.setTextColor(running ? 0xFF7CFFB2 : 0xFF9F9FAD);
+
+        if (startStop != null) {
+            startStop.setText(running ? "Stop Live" : "Start Live");
+        }
     }
 
     private EditText edit(String hint) {
@@ -211,21 +206,26 @@ public class MainActivity extends AppCompatActivity {
 
     private LinearLayout.LayoutParams lp() {
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
         p.bottomMargin = dp(12);
         return p;
     }
 
     private int dp(int v) {
-        return (int) (v * getResources().getDisplayMetrics().density + .5f);
+        return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
     }
 
-    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+    @Override public void onRequestPermissionsResult(
+            int requestCode, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(requestCode, permissions, results);
-        if (requestCode == REQUEST_PERMISSIONS && hasMicPermission()) {
+        if (requestCode == REQUEST_MIC && hasMicPermission()) {
             toggleLive();
-        } else if (requestCode == REQUEST_PERMISSIONS && !hasMicPermission()) {
-            Toast.makeText(this, "Microphone permission is required for Gemini Live.", Toast.LENGTH_LONG).show();
+        } else if (requestCode == REQUEST_MIC) {
+            Toast.makeText(
+                    this,
+                    "Microphone permission is required for Gemini Live.",
+                    Toast.LENGTH_LONG).show();
         }
     }
 }

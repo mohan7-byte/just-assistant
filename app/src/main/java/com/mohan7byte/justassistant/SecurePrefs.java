@@ -20,6 +20,7 @@ public final class SecurePrefs {
     private static final String KEY_MODEL = "model";
     private static final String KEY_PERSONA = "persona";
     private static final String KEY_RUNNING = "running";
+    private static final String KEY_HEARTBEAT = "heartbeat";
 
     private SecurePrefs() {}
 
@@ -45,11 +46,33 @@ public final class SecurePrefs {
     }
 
     public static void saveRunning(Context c, boolean running) {
-        p(c).edit().putBoolean(KEY_RUNNING, running).commit();
+        p(c).edit()
+                .putBoolean(KEY_RUNNING, running)
+                .putLong(KEY_HEARTBEAT, running ? System.currentTimeMillis() : 0L)
+                .commit();
+    }
+
+    public static void touchRunning(Context c) {
+        if (p(c).getBoolean(KEY_RUNNING, false)) {
+            p(c).edit().putLong(KEY_HEARTBEAT, System.currentTimeMillis()).commit();
+        }
     }
 
     public static boolean isRunning(Context c) {
-        return p(c).getBoolean(KEY_RUNNING, false);
+        SharedPreferences prefs = p(c);
+        if (!prefs.getBoolean(KEY_RUNNING, false)) return false;
+
+        long heartbeat = prefs.getLong(KEY_HEARTBEAT, 0L);
+        if (heartbeat <= 0L) {
+            prefs.edit().putBoolean(KEY_RUNNING, false).commit();
+            return false;
+        }
+
+        boolean alive = System.currentTimeMillis() - heartbeat < 8000L;
+        if (!alive) {
+            prefs.edit().putBoolean(KEY_RUNNING, false).putLong(KEY_HEARTBEAT, 0L).commit();
+        }
+        return alive;
     }
 
     public static void saveApiKey(Context c, String apiKey) {
